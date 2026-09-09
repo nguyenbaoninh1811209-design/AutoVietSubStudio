@@ -12,6 +12,7 @@ TIME_RE = re.compile(
 
 
 def to_ms(hours: str, minutes: str, seconds: str, milliseconds: str) -> int:
+    """Convert time components to milliseconds."""
     return (
         (
             (int(hours) * 60 + int(minutes)) * 60
@@ -23,6 +24,7 @@ def to_ms(hours: str, minutes: str, seconds: str, milliseconds: str) -> int:
 
 
 def from_ms(milliseconds: int) -> str:
+    """Convert milliseconds to SRT timestamp format."""
     milliseconds = max(0, int(milliseconds))
 
     hours, remainder = divmod(milliseconds, 3_600_000)
@@ -35,7 +37,13 @@ def from_ms(milliseconds: int) -> str:
     )
 
 
-def parse_timestamp(value: str) -> int | None:
+def parse_timestamp(value: str) -> tuple[int, int] | None:
+    """
+    Parse SRT timestamp line.
+
+    Returns:
+        Tuple of (start_ms, end_ms) or None if invalid.
+    """
     match = TIME_RE.match(value.strip())
 
     if not match:
@@ -56,6 +64,19 @@ def parse_timestamp(value: str) -> int | None:
 
 
 def parse_srt(text: str) -> list[SubtitleLine]:
+    """
+    Parse SRT subtitle text.
+
+    Handles:
+    - UTF-8 and UTF-8 BOM
+    - CRLF and LF line endings
+    - Malformed blocks (skip gracefully)
+    - Multiple text lines per subtitle
+
+    Returns:
+        List of SubtitleLine objects.
+    """
+    # Normalize line endings
     normalized = (
         text.replace("\r\n", "\n")
         .replace("\r", "\n")
@@ -65,6 +86,7 @@ def parse_srt(text: str) -> list[SubtitleLine]:
     if not normalized:
         return []
 
+    # Split by blank lines
     blocks = re.split(r"\n\s*\n", normalized)
     result: list[SubtitleLine] = []
 
@@ -74,11 +96,13 @@ def parse_srt(text: str) -> list[SubtitleLine]:
         if len(lines) < 3:
             continue
 
+        # Parse index
         try:
             index = int(lines[0].strip())
         except ValueError:
             continue
 
+        # Parse timestamp
         timestamp = parse_timestamp(lines[1])
 
         if timestamp is None:
@@ -86,6 +110,7 @@ def parse_srt(text: str) -> list[SubtitleLine]:
 
         start_ms, end_ms = timestamp
 
+        # Parse subtitle text (may be multiple lines)
         original = "\n".join(lines[2:]).strip()
 
         result.append(
@@ -104,18 +129,30 @@ def write_srt(
     lines: list[SubtitleLine],
     use_translated: bool = True,
 ) -> str:
+    """
+    Write subtitles to SRT format.
+
+    Args:
+        lines: List of SubtitleLine objects.
+        use_translated: Use translated text if available, else original.
+
+    Returns:
+        SRT-formatted string.
+    """
     output: list[str] = []
 
     for line in lines:
+        # Choose text
         text = (
             line.translated
-            if use_translated
+            if use_translated and line.translated
             else line.original
         )
 
         if text is None:
             text = ""
 
+        # Build SRT entry
         output.append(str(line.index))
         output.append(
             f"{from_ms(line.start_ms)} --> "
@@ -131,8 +168,25 @@ def validate_alignment(
     original: list[SubtitleLine],
     translated: list[SubtitleLine],
 ) -> tuple[bool, list[int]]:
+    """
+    Validate that translated subtitles match original structure.
+
+    Checks:
+    - Same number of lines
+    - Same index for each line
+    - Same start/end timestamps
+    - Translated text is not empty
+
+    Args:
+        original: List of original SubtitleLine.
+        translated: List of translated SubtitleLine.
+
+    Returns:
+        Tuple of (is_valid, bad_positions). bad_positions are 1-indexed.
+    """
     bad: list[int] = []
 
+    # Check line count
     if len(original) != len(translated):
         max_length = max(len(original), len(translated))
 
@@ -142,6 +196,7 @@ def validate_alignment(
 
         return False, bad
 
+    # Check each line
     for position, (source, target) in enumerate(
         zip(original, translated),
         start=1,
@@ -149,7 +204,7 @@ def validate_alignment(
         same_index = source.index == target.index
         same_start = source.start_ms == target.start_ms
         same_end = source.end_ms == target.end_ms
-        has_translation = bool(target.translated.strip())
+        has_translation = bool(target.translated.strip() if target.translated else "")
 
         if not (
             same_index
@@ -165,24 +220,43 @@ def validate_alignment(
 def validate_srt_lines(
     lines: list[SubtitleLine],
 ) -> tuple[bool, list[int]]:
+    """
+    Validate SRT subtitle lines.
+
+    Checks:
+    - Index > 0
+    - Index increases monotonically
+    - End > Start
+    - No timestamp overlaps
+
+    Args:
+        lines: List of SubtitleLine.
+
+    Returns:
+        Tuple of (is_valid, bad_positions). bad_positions are 1-indexed.
+    """
     bad: list[int] = []
 
     previous_index: int | None = None
     previous_end: int | None = None
 
     for position, line in enumerate(lines, start=1):
+        # Check index
         if line.index <= 0:
             bad.append(position)
             continue
 
+        # Check end > start
         if line.end_ms <= line.start_ms:
             bad.append(position)
             continue
 
+        # Check index increases
         if previous_index is not None and line.index <= previous_index:
             bad.append(position)
             continue
 
+        # Check no overlap
         if previous_end is not None and line.start_ms < previous_end:
             bad.append(position)
 
