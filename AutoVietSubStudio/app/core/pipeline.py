@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Iterator
 
 from .models import Project
-from .srt import write_srt
 
 
 STEPS = [
@@ -34,32 +33,83 @@ class PipelineResult:
 class Pipeline:
     def __init__(self, project: Project, logger=None):
         self.project = project
-        self.logger = logger or logging.getLogger("autovietsub.pipeline")
+        self.logger = (
+            logger
+            or logging.getLogger("autovietsub.pipeline")
+        )
 
-    def _mark(self, step: str, value: bool) -> None:
+    def _mark(
+        self,
+        step: str,
+        value: bool,
+    ) -> None:
         self.project.checkpoints[step] = value
 
-    def is_completed(self, step: str) -> bool:
-        return bool(self.project.checkpoints.get(step, False))
+    def is_completed(
+        self,
+        step: str,
+    ) -> bool:
+        return bool(
+            self.project.checkpoints.get(
+                step,
+                False,
+            )
+        )
 
-    def reset_from(self, step_index: int = 0) -> None:
+    def reset_from(
+        self,
+        step_index: int = 0,
+    ) -> None:
+        if (
+            step_index < 0
+            or step_index > len(STEPS)
+        ):
+            raise ValueError(
+                "step_index không hợp lệ."
+            )
+
         for step in STEPS[step_index:]:
             self._mark(step, False)
 
-    def run(self, start_step: int = 0) -> Iterator[tuple[int, str]]:
-        if start_step < 0 or start_step >= len(STEPS):
-            raise ValueError("start_step không hợp lệ.")
+    def run(
+        self,
+        start_step: int = 0,
+        end_step: int | None = None,
+    ) -> Iterator[tuple[int, str]]:
+        if (
+            start_step < 0
+            or start_step >= len(STEPS)
+        ):
+            raise ValueError(
+                "start_step không hợp lệ."
+            )
 
-        for index in range(start_step, len(STEPS)):
+        if end_step is None:
+            end_step = len(STEPS) - 1
+
+        if (
+            end_step < start_step
+            or end_step >= len(STEPS)
+        ):
+            raise ValueError(
+                "end_step không hợp lệ."
+            )
+
+        for index in range(
+            start_step,
+            end_step + 1,
+        ):
             step = STEPS[index]
 
             if self.is_completed(step):
                 self.logger.info(
-                    "Bỏ qua bước đã hoàn thành %s/%s: %s",
+                    "Bỏ qua bước đã hoàn thành "
+                    "%s/%s: %s",
                     index + 1,
                     len(STEPS),
                     step,
                 )
+
                 yield index, step
                 continue
 
@@ -70,19 +120,34 @@ class Pipeline:
                 step,
             )
 
-            self._mark(step, True)
             yield index, step
 
-        yield len(STEPS), "DONE"
+        yield end_step + 1, "DONE"
 
-    def run_until(self, end_step: int) -> Iterator[tuple[int, str]]:
-        if end_step < 0 or end_step >= len(STEPS):
-            raise ValueError("end_step không hợp lệ.")
-        return self.run(0)
+    def run_until(
+        self,
+        end_step: int,
+    ) -> Iterator[tuple[int, str]]:
+        if (
+            end_step < 0
+            or end_step >= len(STEPS)
+        ):
+            raise ValueError(
+                "end_step không hợp lệ."
+            )
+
+        return self.run(
+            start_step=0,
+            end_step=end_step,
+        )
 
 
 def find_ffmpeg() -> str | None:
-    local = Path(__file__).resolve().parents[2] / "bin" / "ffmpeg.exe"
+    local = (
+        Path(__file__).resolve().parents[2]
+        / "bin"
+        / "ffmpeg.exe"
+    )
 
     if local.exists():
         return str(local)
@@ -90,7 +155,9 @@ def find_ffmpeg() -> str | None:
     return shutil.which("ffmpeg")
 
 
-def build_aspect_filter(aspect_ratio: str) -> str | None:
+def build_aspect_filter(
+    aspect_ratio: str,
+) -> str | None:
     filters = {
         "9:16": (
             "scale=ih*9/16:ih:"
@@ -123,20 +190,30 @@ def render_video(
 
     if not input_file.exists():
         raise FileNotFoundError(
-            f"Không tìm thấy video đầu vào: {input_file}"
+            "Không tìm thấy video đầu vào: "
+            f"{input_file}"
         )
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    ffmpeg_path = ffmpeg or find_ffmpeg()
+    ffmpeg_path = (
+        ffmpeg
+        or find_ffmpeg()
+    )
 
     if not ffmpeg_path:
         raise RuntimeError(
             "Không tìm thấy FFmpeg. "
-            "Hãy đặt ffmpeg.exe trong bin/ hoặc thêm FFmpeg vào PATH."
+            "Hãy đặt ffmpeg.exe trong bin/ "
+            "hoặc thêm FFmpeg vào PATH."
         )
 
-    video_filter = build_aspect_filter(aspect_ratio)
+    video_filter = build_aspect_filter(
+        aspect_ratio
+    )
 
     command = [
         ffmpeg_path,
@@ -146,7 +223,12 @@ def render_video(
     ]
 
     if video_filter:
-        command.extend(["-vf", video_filter])
+        command.extend(
+            [
+                "-vf",
+                video_filter,
+            ]
+        )
 
     command.extend(
         [
@@ -171,12 +253,18 @@ def render_video(
             capture_output=True,
             text=True,
         )
+
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "").strip()
+        detail = (
+            exc.stderr
+            or exc.stdout
+            or ""
+        ).strip()
 
         if len(detail) > 2000:
             detail = detail[-2000:]
 
         raise RuntimeError(
-            f"FFmpeg render thất bại.\n{detail}"
+            "FFmpeg render thất bại.\n"
+            f"{detail}"
         ) from exc
