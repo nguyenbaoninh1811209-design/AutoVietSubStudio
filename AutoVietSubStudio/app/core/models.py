@@ -1,8 +1,13 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
-import json, time, uuid
+import json
+import os
+import time
+import uuid
+
 
 @dataclass
 class SubtitleLine:
@@ -15,6 +20,7 @@ class SubtitleLine:
     status: str = "pending"
     source_region: dict[str, float] | None = None
 
+
 @dataclass
 class BlurRegion:
     x: float
@@ -22,6 +28,7 @@ class BlurRegion:
     width: float
     height: float
     strength: int = 12
+
 
 @dataclass
 class ProjectSettings:
@@ -41,6 +48,7 @@ class ProjectSettings:
     blur_regions: list[BlurRegion] = field(default_factory=list)
     auto_save: bool = True
 
+
 @dataclass
 class Project:
     id: str
@@ -56,51 +64,134 @@ class Project:
     @staticmethod
     def new(name: str = "Untitled Project") -> "Project":
         now = time.time()
-        return Project(id=str(uuid.uuid4()), name=name, created_at=now, updated_at=now)
+        return Project(
+            id=str(uuid.uuid4()),
+            name=name,
+            created_at=now,
+            updated_at=now,
+        )
 
     def touch(self) -> None:
         self.updated_at = time.time()
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        return data
+        return asdict(self)
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "Project":
-        settings = ProjectSettings(**data.get("settings", {}))
-        subs = [SubtitleLine(**x) for x in data.get("subtitles", [])]
-        settings.blur_regions = [BlurRegion(**x) if isinstance(x, dict) else x for x in data.get("settings", {}).get("blur_regions", [])]
+        raw_settings = data.get("settings", {})
+
+        blur_regions = [
+            BlurRegion(**item)
+            for item in raw_settings.get("blur_regions", [])
+            if isinstance(item, dict)
+        ]
+
+        settings_data = dict(raw_settings)
+        settings_data["blur_regions"] = blur_regions
+
+        settings = ProjectSettings(**settings_data)
+
+        subtitles = [
+            SubtitleLine(**item)
+            for item in data.get("subtitles", [])
+            if isinstance(item, dict)
+        ]
+
         return Project(
-            id=data["id"], name=data["name"], created_at=data["created_at"], updated_at=data["updated_at"],
-            video_path=data.get("video_path", ""), subtitle_path=data.get("subtitle_path", ""),
-            subtitles=subs, settings=settings, checkpoints=data.get("checkpoints", {})
+            id=data["id"],
+            name=data["name"],
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+            video_path=data.get("video_path", ""),
+            subtitle_path=data.get("subtitle_path", ""),
+            subtitles=subtitles,
+            settings=settings,
+            checkpoints=data.get("checkpoints", {}),
         )
+
 
 class ProjectStore:
     def __init__(self, root: Path):
-        self.root = root
+        self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
     def path_for(self, project: Project) -> Path:
         return self.root / f"{project.id}.json"
 
+    def backup_path_for(self, project: Project) -> Path:
+        return self.root / f"{project.id}.json.bak"
+
     def save(self, project: Project) -> Path:
         project.touch()
+
         path = self.path_for(project)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(project.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        temp_path = path.with_suffix(".json.tmp")
+        backup_path = self.backup_path_for(project)
+
+        payload = json.dumps(
+            project.to_dict(),
+            ensure_ascii=False,
+            indent=2,
+        )
+
+        temp_path.write_text(payload, encoding="utf-8")
+
+        if path.exists():
+            try:
+                backup_path.write_bytes(path.read_bytes())
+            except OSError:
+                pass
+
+        os.replace(temp_path, path)
+
         return path
 
     def load(self, path: Path) -> Project:
-        return Project.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        path = Path(path)
+
+        try:
+            return Project.from_dict(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            backup_path = Path(f"{path}.bak")
+
+            if backup_path.exists():
+                return Project.from_dict(
+                    json.loads(backup_path.read_text(encoding="utf-8"))
+                )
+
+            raise
+
+    def recover(self, project_id: str) -> Project | None:
+        path = self.root / f"{project_id}.json"
+        backup_path = self.root / f"{project_id}.json.bak"
+
+        for candidate in (path, backup_path):
+            if not candidate.exists():
+                continue
+
+            try:
+                return Project.from_dict(
+                    json.loads(candidate.read_text(encoding="utf-8"))
+                )
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+
+        return None
 
     def list_projects(self) -> list[tuple[str, Path]]:
-        items=[]
-        for p in self.root.glob("*.json"):
+        items: list[tuple[str, Path]] = []
+
+        for path in self.root.glob("*.json"):
             try:
-                data=json.loads(p.read_text(encoding="utf-8"))
-                items.append((data.get("name", p.stem), p))
-            except Exception:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                items.append((data.get("name", path.stem), path))
+            except (OSError, json.JSONDecodeError, TypeError):
                 continue
-        return sorted(items, key=lambda x:x[0].lower())
+
+        return sorted(
+            items,
+            key=lambda item: item[0].lower(),
+        )
