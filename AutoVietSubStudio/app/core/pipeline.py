@@ -31,11 +31,17 @@ class PipelineResult:
 
 
 class Pipeline:
-    def __init__(self, project: Project, logger=None):
+    def __init__(
+        self,
+        project: Project,
+        logger=None,
+    ):
         self.project = project
         self.logger = (
             logger
-            or logging.getLogger("autovietsub.pipeline")
+            or logging.getLogger(
+                "autovietsub.pipeline"
+            )
         )
 
     def _mark(
