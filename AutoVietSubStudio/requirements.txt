@@ -1,0 +1,8 @@
+PySide6>=6.7,<7
+openai>=1.60,<3
+pydantic>=2.8,<3
+pytest>=8,<9
+# Optional providers:
+# pytesseract>=0.3.13
+# faster-whisper>=1.1
+# edge-tts>=6.1
