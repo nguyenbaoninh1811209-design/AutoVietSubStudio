@@ -31,6 +31,8 @@ class PipelineResult:
 
 
 class Pipeline:
+    """Pipeline for processing video subtitle projects."""
+
     def __init__(
         self,
         project: Project,
@@ -49,12 +51,14 @@ class Pipeline:
         step: str,
         value: bool,
     ) -> None:
+        """Mark pipeline step as completed or not."""
         self.project.checkpoints[step] = value
 
     def is_completed(
         self,
         step: str,
     ) -> bool:
+        """Check if pipeline step is completed."""
         return bool(
             self.project.checkpoints.get(
                 step,
@@ -66,6 +70,7 @@ class Pipeline:
         self,
         step_index: int = 0,
     ) -> None:
+        """Reset all checkpoints from given step onward."""
         if (
             step_index < 0
             or step_index > len(STEPS)
@@ -82,6 +87,13 @@ class Pipeline:
         start_step: int = 0,
         end_step: int | None = None,
     ) -> Iterator[tuple[int, str]]:
+        """
+        Run pipeline from start_step to end_step (inclusive).
+
+        Yields:
+            (step_index, step_name) tuples for each step.
+            Final yield is (len(STEPS), "DONE").
+        """
         if (
             start_step < 0
             or start_step >= len(STEPS)
@@ -128,12 +140,13 @@ class Pipeline:
 
             yield index, step
 
-        yield end_step + 1, "DONE"
+        yield len(STEPS), "DONE"
 
     def run_until(
         self,
         end_step: int,
     ) -> Iterator[tuple[int, str]]:
+        """Run pipeline from beginning until end_step (inclusive)."""
         if (
             end_step < 0
             or end_step >= len(STEPS)
@@ -149,6 +162,13 @@ class Pipeline:
 
 
 def find_ffmpeg() -> str | None:
+    """
+    Find FFmpeg executable.
+
+    Priority:
+    1. AutoVietSubStudio/bin/ffmpeg.exe
+    2. System PATH
+    """
     local = (
         Path(__file__).resolve().parents[2]
         / "bin"
@@ -164,6 +184,18 @@ def find_ffmpeg() -> str | None:
 def build_aspect_filter(
     aspect_ratio: str,
 ) -> str | None:
+    """
+    Build FFmpeg aspect ratio filter.
+
+    Supports: 9:16, 1:1, 4:5, 4:3
+    Returns None for 16:9 (keep original).
+
+    Args:
+        aspect_ratio: Aspect ratio string (e.g., "16:9").
+
+    Returns:
+        FFmpeg filter string or None.
+    """
     filters = {
         "9:16": (
             "scale=ih*9/16:ih:"
@@ -180,6 +212,11 @@ def build_aspect_filter(
             "force_original_aspect_ratio=increase,"
             "crop=ih*4/5:ih"
         ),
+        "4:3": (
+            "scale=iw*4/3:ih:"
+            "force_original_aspect_ratio=increase,"
+            "crop=iw*4/3:ih"
+        ),
     }
 
     return filters.get(aspect_ratio)
@@ -191,20 +228,36 @@ def render_video(
     ffmpeg: str | None = None,
     aspect_ratio: str = "16:9",
 ) -> None:
+    """
+    Render video with aspect ratio conversion using FFmpeg.
+
+    Args:
+        input_path: Path to input video.
+        output_path: Path to output video.
+        ffmpeg: Optional path to FFmpeg executable.
+        aspect_ratio: Target aspect ratio (default: 16:9).
+
+    Raises:
+        FileNotFoundError: If input video not found.
+        RuntimeError: If FFmpeg not found or render fails.
+    """
     input_file = Path(input_path)
     output_file = Path(output_path)
 
+    # Check input
     if not input_file.exists():
         raise FileNotFoundError(
             "Không tìm thấy video đầu vào: "
             f"{input_file}"
         )
 
+    # Create output directory
     output_file.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    # Find FFmpeg
     ffmpeg_path = (
         ffmpeg
         or find_ffmpeg()
@@ -217,10 +270,12 @@ def render_video(
             "hoặc thêm FFmpeg vào PATH."
         )
 
+    # Build filter
     video_filter = build_aspect_filter(
         aspect_ratio
     )
 
+    # Build command
     command = [
         ffmpeg_path,
         "-y",
@@ -252,6 +307,7 @@ def render_video(
         ]
     )
 
+    # Run FFmpeg
     try:
         subprocess.run(
             command,
