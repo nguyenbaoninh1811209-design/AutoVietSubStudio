@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .models import SubtitleLine
 
@@ -13,6 +13,18 @@ class TranslationContext:
     glossary: dict[str, str] | None = None
 
 
+@dataclass
+class TranslationProgress:
+    completed: int
+    total: int
+    percentage: float
+    batch_number: int
+    total_batches: int
+    current_line: int | None = None
+    failed_lines: list[int] | None = None
+    message: str = ""
+
+
 class Translator(Protocol):
     def translate(
         self,
@@ -20,6 +32,9 @@ class Translator(Protocol):
         ctx: TranslationContext,
     ) -> list[str]:
         ...
+
+
+ProgressCallback = Callable[[TranslationProgress], None]
 
 
 MODE_PROMPTS = {
@@ -89,16 +104,70 @@ def _is_valid_translation(text: str | None) -> bool:
 
 
 class TranslationEngine:
-    def __init__(self, provider: Translator):
+    def __init__(
+        self,
+        provider: Translator,
+        progress_callback: ProgressCallback | None = None,
+    ):
         self.provider = provider
+        self.progress_callback = progress_callback
+
+    def _report(
+        self,
+        *,
+        completed: int,
+        total: int,
+        batch_number: int,
+        total_batches: int,
+        current_line: int | None = None,
+        failed_lines: list[int] | None = None,
+        message: str = "",
+    ) -> None:
+        percentage = 0.0
+
+        if total > 0:
+            percentage = (completed / total) * 100.0
+
+        progress = TranslationProgress(
+            completed=completed,
+            total=total,
+            percentage=percentage,
+            batch_number=batch_number,
+            total_batches=total_batches,
+            current_line=current_line,
+            failed_lines=list(failed_lines or []),
+            message=message,
+        )
+
+        if self.progress_callback:
+            self.progress_callback(progress)
 
     def _translate_one(
         self,
         line: SubtitleLine,
         ctx: TranslationContext,
         max_retries: int,
+        *,
+        completed: int,
+        total: int,
+        batch_number: int,
+        total_batches: int,
+        failed_lines: list[int],
     ) -> bool:
-        for attempt in range(max_retries + 1):
+        for attempt in range(1, max_retries + 2):
+            self._report(
+                completed=completed,
+                total=total,
+                batch_number=batch_number,
+                total_batches=total_batches,
+                current_line=line.index,
+                failed_lines=failed_lines,
+                message=(
+                    f"Retry dòng #{line.index} "
+                    f"(lần {attempt}/{max_retries + 1})"
+                ),
+            )
+
             try:
                 result = self.provider.translate(
                     [line.original],
@@ -115,13 +184,37 @@ class TranslationEngine:
 
                 line.translated = translated.strip()
                 line.status = "translated"
+
+                self._report(
+                    completed=completed + 1,
+                    total=total,
+                    batch_number=batch_number,
+                    total_batches=total_batches,
+                    current_line=line.index,
+                    failed_lines=failed_lines,
+                    message=f"Dòng #{line.index}: OK",
+                )
+
                 return True
 
             except Exception:
-                if attempt >= max_retries:
-                    break
+                continue
 
         line.status = "translation_failed"
+
+        if line.index not in failed_lines:
+            failed_lines.append(line.index)
+
+        self._report(
+            completed=completed,
+            total=total,
+            batch_number=batch_number,
+            total_batches=total_batches,
+            current_line=line.index,
+            failed_lines=failed_lines,
+            message=f"Dòng #{line.index}: FAILED",
+        )
+
         return False
 
     def translate_lines(
@@ -137,10 +230,53 @@ class TranslationEngine:
         if max_retries < 0:
             raise ValueError("max_retries không được âm.")
 
-        failures: list[int] = []
+        total = len(lines)
 
-        for start in range(0, len(lines), batch_size):
+        if total == 0:
+            self._report(
+                completed=0,
+                total=0,
+                batch_number=0,
+                total_batches=0,
+                message="Không có dòng để dịch.",
+            )
+            return []
+
+        total_batches = (total + batch_size - 1) // batch_size
+        failures: list[int] = []
+        completed = 0
+
+        self._report(
+            completed=0,
+            total=total,
+            batch_number=0,
+            total_batches=total_batches,
+            message=f"Bắt đầu dịch {total} dòng.",
+        )
+
+        for batch_index, start in enumerate(
+            range(0, total, batch_size),
+            start=1,
+        ):
             batch = lines[start:start + batch_size]
+
+            batch_line_numbers = [
+                line.index
+                for line in batch
+            ]
+
+            self._report(
+                completed=completed,
+                total=total,
+                batch_number=batch_index,
+                total_batches=total_batches,
+                failed_lines=failures,
+                message=(
+                    f"Batch {batch_index}/{total_batches} "
+                    f"- dòng #{batch_line_numbers[0]}"
+                    f" đến #{batch_line_numbers[-1]}"
+                ),
+            )
 
             try:
                 translated = self.provider.translate(
@@ -151,30 +287,77 @@ class TranslationEngine:
                 if len(translated) != len(batch):
                     raise ValueError(
                         "Provider trả về số lượng bản dịch "
-                        "không khớp với số dòng yêu cầu."
+                        "không khớp."
                     )
 
                 for line, text in zip(batch, translated):
                     if _is_valid_translation(text):
                         line.translated = text.strip()
                         line.status = "translated"
+                        completed += 1
+
+                        self._report(
+                            completed=completed,
+                            total=total,
+                            batch_number=batch_index,
+                            total_batches=total_batches,
+                            current_line=line.index,
+                            failed_lines=failures,
+                            message=f"Dòng #{line.index}: OK",
+                        )
                     else:
-                        if not self._translate_one(
+                        self._translate_one(
                             line,
                             ctx,
                             max_retries,
-                        ):
-                            failures.append(line.index)
+                            completed=completed,
+                            total=total,
+                            batch_number=batch_index,
+                            total_batches=total_batches,
+                            failed_lines=failures,
+                        )
+
+                        if line.status == "translated":
+                            completed += 1
 
             except Exception:
-                # Batch lỗi: chỉ retry từng dòng,
-                # không bỏ cả batch.
+                self._report(
+                    completed=completed,
+                    total=total,
+                    batch_number=batch_index,
+                    total_batches=total_batches,
+                    failed_lines=failures,
+                    message=(
+                        f"Batch {batch_index}/{total_batches} lỗi. "
+                        "Chuyển sang retry từng dòng."
+                    ),
+                )
+
                 for line in batch:
-                    if not self._translate_one(
+                    success = self._translate_one(
                         line,
                         ctx,
                         max_retries,
-                    ):
-                        failures.append(line.index)
+                        completed=completed,
+                        total=total,
+                        batch_number=batch_index,
+                        total_batches=total_batches,
+                        failed_lines=failures,
+                    )
+
+                    if success:
+                        completed += 1
+
+        self._report(
+            completed=completed,
+            total=total,
+            batch_number=total_batches,
+            total_batches=total_batches,
+            failed_lines=failures,
+            message=(
+                f"Hoàn tất: {completed}/{total} dòng. "
+                f"Lỗi: {failures if failures else 'không có'}"
+            ),
+        )
 
         return failures
