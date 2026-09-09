@@ -1,11 +1,28 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-import logging, shutil, subprocess
+import logging
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Iterator
+
 from .models import Project
 from .srt import write_srt
 
-STEPS=["Analyze","Subtitle","Translate","Validate","TTS","Sync","Video","Render","Validate Output"]
+
+STEPS = [
+    "Analyze",
+    "Subtitle",
+    "Translate",
+    "Validate",
+    "TTS",
+    "Sync",
+    "Video",
+    "Render",
+    "Validate Output",
+]
+
 
 @dataclass
 class PipelineResult:
@@ -13,32 +30,153 @@ class PipelineResult:
     step: str
     message: str
 
+
 class Pipeline:
     def __init__(self, project: Project, logger=None):
-        self.project=project
-        self.logger=logger or logging.getLogger("autovietsub.pipeline")
+        self.project = project
+        self.logger = logger or logging.getLogger("autovietsub.pipeline")
 
-    def run(self, start_step=0):
-        for i,step in enumerate(STEPS[start_step:],start=start_step):
-            self.logger.info("Pipeline step %s/%s: %s", i+1, len(STEPS), step)
-            self.project.checkpoints[step]=True
-            yield i,step
-        yield len(STEPS),"DONE"
+    def _mark(self, step: str, value: bool) -> None:
+        self.project.checkpoints[step] = value
+
+    def is_completed(self, step: str) -> bool:
+        return bool(self.project.checkpoints.get(step, False))
+
+    def reset_from(self, step_index: int = 0) -> None:
+        for step in STEPS[step_index:]:
+            self._mark(step, False)
+
+    def run(self, start_step: int = 0) -> Iterator[tuple[int, str]]:
+        if start_step < 0 or start_step >= len(STEPS):
+            raise ValueError("start_step không hợp lệ.")
+
+        for index in range(start_step, len(STEPS)):
+            step = STEPS[index]
+
+            if self.is_completed(step):
+                self.logger.info(
+                    "Bỏ qua bước đã hoàn thành %s/%s: %s",
+                    index + 1,
+                    len(STEPS),
+                    step,
+                )
+                yield index, step
+                continue
+
+            self.logger.info(
+                "Pipeline step %s/%s: %s",
+                index + 1,
+                len(STEPS),
+                step,
+            )
+
+            self._mark(step, True)
+            yield index, step
+
+        yield len(STEPS), "DONE"
+
+    def run_until(self, end_step: int) -> Iterator[tuple[int, str]]:
+        if end_step < 0 or end_step >= len(STEPS):
+            raise ValueError("end_step không hợp lệ.")
+        return self.run(0)
 
 
 def find_ffmpeg() -> str | None:
-    local=Path(__file__).resolve().parents[2]/"bin"/"ffmpeg.exe"
-    if local.exists(): return str(local)
+    local = Path(__file__).resolve().parents[2] / "bin" / "ffmpeg.exe"
+
+    if local.exists():
+        return str(local)
+
     return shutil.which("ffmpeg")
 
-def render_video(input_path: str, output_path: str, ffmpeg: str | None=None, aspect_ratio="16:9") -> None:
-    ffmpeg=ffmpeg or find_ffmpeg()
-    if not ffmpeg: raise RuntimeError("Không tìm thấy FFmpeg. Hãy đặt ffmpeg.exe trong bin/ hoặc PATH.")
-    vf=[]
-    if aspect_ratio=="9:16": vf.append("scale=ih*9/16:ih:force_original_aspect_ratio=increase,crop=ih*9/16:ih")
-    elif aspect_ratio=="1:1": vf.append("scale=ih:ih:force_original_aspect_ratio=increase,crop=ih:ih")
-    elif aspect_ratio=="4:5": vf.append("scale=ih*4/5:ih:force_original_aspect_ratio=increase,crop=ih*4/5:ih")
-    cmd=[ffmpeg,"-y","-i",input_path]
-    if vf: cmd += ["-vf",",".join(vf)]
-    cmd += ["-c:v","libx264","-preset","medium","-crf","20","-c:a","aac",output_path]
-    subprocess.run(cmd,check=True)
+
+def build_aspect_filter(aspect_ratio: str) -> str | None:
+    filters = {
+        "9:16": (
+            "scale=ih*9/16:ih:"
+            "force_original_aspect_ratio=increase,"
+            "crop=ih*9/16:ih"
+        ),
+        "1:1": (
+            "scale=ih:ih:"
+            "force_original_aspect_ratio=increase,"
+            "crop=ih:ih"
+        ),
+        "4:5": (
+            "scale=ih*4/5:ih:"
+            "force_original_aspect_ratio=increase,"
+            "crop=ih*4/5:ih"
+        ),
+    }
+
+    return filters.get(aspect_ratio)
+
+
+def render_video(
+    input_path: str,
+    output_path: str,
+    ffmpeg: str | None = None,
+    aspect_ratio: str = "16:9",
+) -> None:
+    input_file = Path(input_path)
+    output_file = Path(output_path)
+
+    if not input_file.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy video đầu vào: {input_file}"
+        )
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    ffmpeg_path = ffmpeg or find_ffmpeg()
+
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "Không tìm thấy FFmpeg. "
+            "Hãy đặt ffmpeg.exe trong bin/ hoặc thêm FFmpeg vào PATH."
+        )
+
+    video_filter = build_aspect_filter(aspect_ratio)
+
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(input_file),
+    ]
+
+    if video_filter:
+        command.extend(["-vf", video_filter])
+
+    command.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "20",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output_file),
+        ]
+    )
+
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+
+        if len(detail) > 2000:
+            detail = detail[-2000:]
+
+        raise RuntimeError(
+            f"FFmpeg render thất bại.\n{detail}"
+        ) from exc
