@@ -33,6 +33,8 @@ class BlurRegion:
 @dataclass
 class ProjectSettings:
     language: str = "vi"
+    source_language: str = "auto"
+    target_language: str = "vi"
     translation_mode: str = "Bình thường"
     aspect_ratio: str = "16:9"
     performance_mode: str = "Balanced"
@@ -79,30 +81,56 @@ class Project:
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "Project":
+        """
+        Load project from dict with safe deserialization.
+
+        Handles:
+        - Old project format (backward compatibility)
+        - Missing fields (use defaults)
+        - Unknown fields (ignore)
+        - Type mismatches (coerce or skip)
+        - Blur regions deserialization
+        - Subtitle fields deserialization
+        """
+        # Extract and process settings
         raw_settings = data.get("settings", {})
 
-        blur_regions = [
-            BlurRegion(**item)
-            for item in raw_settings.get("blur_regions", [])
-            if isinstance(item, dict)
-        ]
+        # Safely deserialize blur_regions
+        blur_regions = []
+        for item in raw_settings.get("blur_regions", []):
+            if isinstance(item, dict):
+                try:
+                    blur_regions.append(BlurRegion(**item))
+                except TypeError:
+                    # Skip malformed blur regions
+                    pass
 
+        # Prepare settings data with safe defaults
         settings_data = dict(raw_settings)
         settings_data["blur_regions"] = blur_regions
 
-        settings = ProjectSettings(**settings_data)
+        # Safely create ProjectSettings
+        settings = ProjectSettings(**{
+            k: v for k, v in settings_data.items()
+            if k in ProjectSettings.__dataclass_fields__
+        })
 
-        subtitles = [
-            SubtitleLine(**item)
-            for item in data.get("subtitles", [])
-            if isinstance(item, dict)
-        ]
+        # Safely deserialize subtitles
+        subtitles = []
+        for item in data.get("subtitles", []):
+            if isinstance(item, dict):
+                try:
+                    subtitles.append(SubtitleLine(**item))
+                except TypeError:
+                    # Skip malformed subtitle lines
+                    pass
 
+        # Build project with safe field extraction
         return Project(
-            id=data["id"],
-            name=data["name"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
+            id=data.get("id", str(uuid.uuid4())),
+            name=data.get("name", "Untitled Project"),
+            created_at=data.get("created_at", time.time()),
+            updated_at=data.get("updated_at", time.time()),
             video_path=data.get("video_path", ""),
             subtitle_path=data.get("subtitle_path", ""),
             subtitles=subtitles,
@@ -112,6 +140,8 @@ class Project:
 
 
 class ProjectStore:
+    """Store and load projects with atomic operations and backup support."""
+
     def __init__(self, root: Path):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -123,6 +153,13 @@ class ProjectStore:
         return self.root / f"{project.id}.json.bak"
 
     def save(self, project: Project) -> Path:
+        """
+        Save project with atomic write and backup.
+
+        1. Write to temp file first
+        2. Back up old file if exists
+        3. Atomic rename temp -> main
+        """
         project.touch()
 
         path = self.path_for(project)
@@ -135,19 +172,29 @@ class ProjectStore:
             indent=2,
         )
 
+        # Write to temp file
         temp_path.write_text(payload, encoding="utf-8")
 
+        # Back up old file
         if path.exists():
             try:
                 backup_path.write_bytes(path.read_bytes())
             except OSError:
                 pass
 
+        # Atomic replace
         os.replace(temp_path, path)
 
         return path
 
     def load(self, path: Path) -> Project:
+        """
+        Load project with fallback to backup.
+
+        1. Try to load main file
+        2. If fails, try backup file
+        3. If both fail, raise exception
+        """
         path = Path(path)
 
         try:
@@ -158,13 +205,21 @@ class ProjectStore:
             backup_path = Path(f"{path}.bak")
 
             if backup_path.exists():
-                return Project.from_dict(
-                    json.loads(backup_path.read_text(encoding="utf-8"))
-                )
+                try:
+                    return Project.from_dict(
+                        json.loads(backup_path.read_text(encoding="utf-8"))
+                    )
+                except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    pass
 
             raise
 
     def recover(self, project_id: str) -> Project | None:
+        """
+        Try to recover project from main or backup file.
+
+        Returns None if both fail.
+        """
         path = self.root / f"{project_id}.json"
         backup_path = self.root / f"{project_id}.json.bak"
 
@@ -182,6 +237,7 @@ class ProjectStore:
         return None
 
     def list_projects(self) -> list[tuple[str, Path]]:
+        """List all projects with (name, path) tuples."""
         items: list[tuple[str, Path]] = []
 
         for path in self.root.glob("*.json"):
